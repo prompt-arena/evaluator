@@ -1,0 +1,16 @@
+{
+  "challengeId": "22222222-2222-2222-2222-222222222200",
+  "slug": "null-deref-auth-middleware",
+  "hiddenRepo": "prompt-arena/hidden-null-deref-auth-middleware",
+  "runtime": "node",
+  "entryPoint": "src/authMiddleware.ts",
+  "editablePaths": ["src/**", "tests/hidden/**"],
+  "protectedFiles": {
+    "tests/public/authMiddleware.test.ts": "f45876f3e8541a80c89c3a7f35cfefc2b8e85962f5e390c2b8bfb1884853890c",
+    "challenge.json": "19db3193143b8e5a4e326ac7131d9d8aee64833f9997fc2341cda5291a02cf46",
+    "package.json": "32cbbe44163f3286ed1c85e6deb96fa1955419b51b48b9f4c7503d00139cd268",
+    "jest.config.js": "5f45cc3c6ed1973c1240d340376158f02dedebb79397f712ecbd951f2648ad34",
+    "tsconfig.json": "ce3ac108671d52899ccd4e6df315985e9676e2b62153a422add48a2a0c1649a1",
+    "CHALLENGE.md": "029867b7e54c905883c78608bfca62facc03b65711198f2df10c07fdd15bf84a"
+  }
+}

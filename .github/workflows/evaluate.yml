@@ -1,0 +1,88 @@
+# 🔴 Authoritative evaluation workflow (ADR-0001). Lives ONLY in the trusted, founder-write-only
+# prompt-arena/evaluator repo. Backend-dispatched via workflow_dispatch. Secrets (HIDDEN_TESTS_TOKEN,
+# CALLBACK_SECRET, BACKEND_URL) are Actions secrets HERE — never inputs, never in the challenge repo.
+#
+# NOTE: actions are referenced by tag for now; pin to commit SHAs before beta (hardening).
+name: evaluate
+
+on:
+  workflow_dispatch:
+    inputs:
+      submissionId:
+        description: Backend submission id (GUID)
+        required: true
+      participantRepo:
+        description: Public participant repo as owner/name
+        required: true
+      commitSha:
+        description: Exact commit to evaluate
+        required: true
+      challengeSlug:
+        description: Challenge slug (selects the integrity manifest)
+        required: true
+
+# One run per submission; a newer dispatch supersedes an in-flight one.
+concurrency:
+  group: eval-${{ github.event.inputs.submissionId }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout evaluator (scripts + manifests)
+        uses: actions/checkout@v4
+
+      - name: Checkout participant code @ commit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.participantRepo }}
+          ref: ${{ github.event.inputs.commitSha }}
+          path: work
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Resolve manifest + integrity
+        id: integrity
+        run: |
+          chmod +x .eval/*.sh
+          MANIFEST="challenges/${{ github.event.inputs.challengeSlug }}/manifest.json"
+          if [[ ! -f "$MANIFEST" ]]; then echo "unknown challenge manifest: $MANIFEST" >&2; exit 1; fi
+          echo "manifest=$MANIFEST" >> "$GITHUB_OUTPUT"
+          echo "hiddenRepo=$(jq -r '.hiddenRepo' "$MANIFEST")" >> "$GITHUB_OUTPUT"
+          intact=$(.eval/verify_integrity.sh "$MANIFEST" work | jq -r '.protectedFilesIntact')
+          echo "intact=$intact" >> "$GITHUB_OUTPUT"
+          echo "protectedFilesIntact=$intact"
+
+      # Only script that receives the hidden-tests token. Skipped entirely when tampered.
+      - name: Fetch hidden tests
+        if: steps.integrity.outputs.intact == 'true'
+        run: .eval/fetch_hidden.sh work "${{ steps.integrity.outputs.hiddenRepo }}"
+        env:
+          HIDDEN_TESTS_TOKEN: ${{ secrets.HIDDEN_TESTS_TOKEN }}
+
+      # Runs participant code — deliberately has NO secrets in scope.
+      - name: Evaluate
+        run: |
+          .eval/run.sh work "${{ steps.integrity.outputs.manifest }}" > components.json
+          jq '{integrity, build, tests}' components.json
+
+      - name: Scrub hidden material
+        if: always()
+        run: rm -rf work/tests/hidden || true
+
+      - name: Sign + submit score
+        run: .eval/submit.sh components.json
+        env:
+          SUBMISSION_ID: ${{ github.event.inputs.submissionId }}
+          RUN_ID: ${{ github.run_id }}
+          COMMIT_SHA: ${{ github.event.inputs.commitSha }}
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
