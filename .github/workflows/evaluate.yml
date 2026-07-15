@@ -2,10 +2,11 @@
 # prompt-arena/evaluator repo. Backend-dispatched via workflow_dispatch. Secrets are Actions secrets HERE —
 # never inputs, never in the challenge repo, never in the platform monorepo.
 #
-# Trust stages (J3-T02):
-#   prepare — workspace + hidden fetch (secrets); never runs participant code; encrypts artifact
-#   execute — decrypt (step-scoped wrap secret) → build/tests/quality; no job-level secrets; no HMAC secret
-#   submit  — HMAC + callback only; never downloads participant code or hidden tests
+# Trust stages (J3-T02 + App-mint hardening):
+#   prepare — mint short-lived App installation tokens → workspace + hidden fetch; never runs participant code;
+#             encrypts artifact. ⛔ No long-lived WORKSPACE_READ_TOKEN / HIDDEN_TESTS_TOKEN PATs.
+#   execute — decrypt (step-scoped wrap secret) → build/tests/quality; no job-level secrets; no HMAC / App creds
+#   submit  — HMAC + callback only; never downloads participant code or hidden tests; no App creds
 name: evaluate
 
 on:
@@ -15,7 +16,7 @@ on:
         description: Backend submission id (GUID)
         required: true
       participantRepo:
-        description: Workspace (or participant) repo as owner/name
+        description: Workspace repo as owner/name (must be promptarena-workspaces/…)
         required: true
       commitSha:
         description: Exact commit to evaluate
@@ -43,18 +44,86 @@ jobs:
       - name: Checkout evaluator (scripts + manifests)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Checkout workspace commit (authenticated)
+      - name: Resolve + allowlist workspace repo
+        id: workspace
+        run: |
+          set -euo pipefail
+          full="${{ github.event.inputs.participantRepo }}"
+          owner="${full%%/*}"
+          name="${full#*/}"
+          if [[ "$full" != */* ]] || [[ -z "$owner" ]] || [[ -z "$name" ]] || [[ "$name" == *"/"* ]]; then
+            echo "prepare: participantRepo must be owner/name" >&2
+            exit 1
+          fi
+          if [[ "$owner" != "promptarena-workspaces" ]]; then
+            echo "prepare: workspace owner must be promptarena-workspaces (got ${owner})" >&2
+            exit 1
+          fi
+          echo "owner=${owner}" >> "$GITHUB_OUTPUT"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      # Dedicated evaluator App (Contents:read + Metadata:read only). SHA-pinned.
+      # https://github.com/actions/create-github-app-token/releases/tag/v3.2.0
+      - name: Mint workspace installation token
+        id: workspace-app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.EVALUATOR_APP_CLIENT_ID }}
+          private-key: ${{ secrets.EVALUATOR_APP_PRIVATE_KEY }}
+          owner: promptarena-workspaces
+          repositories: ${{ steps.workspace.outputs.name }}
+
+      - name: Checkout workspace commit (App token; no credential persistence)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: ${{ github.event.inputs.participantRepo }}
           ref: ${{ github.event.inputs.commitSha }}
           path: work
           persist-credentials: false
-          token: ${{ secrets.WORKSPACE_READ_TOKEN }}
+          token: ${{ steps.workspace-app-token.outputs.token }}
+
+      - name: Resolve + allowlist hidden repo
+        id: hidden
+        run: |
+          set -euo pipefail
+          slug="${{ github.event.inputs.challengeSlug }}"
+          manifest="challenges/${slug}/manifest.json"
+          if [[ ! -f "$manifest" ]]; then
+            echo "prepare: unknown challenge manifest: ${manifest}" >&2
+            exit 1
+          fi
+          full="$(jq -r '.hiddenRepo' "$manifest")"
+          owner="${full%%/*}"
+          name="${full#*/}"
+          if [[ "$full" != */* ]] || [[ -z "$owner" ]] || [[ -z "$name" ]] || [[ "$name" == *"/"* ]]; then
+            echo "prepare: hiddenRepo must be owner/name" >&2
+            exit 1
+          fi
+          if [[ "$owner" != "prompt-arena" ]]; then
+            echo "prepare: hidden owner must be prompt-arena (got ${owner})" >&2
+            exit 1
+          fi
+          if [[ "$name" != hidden-* ]]; then
+            echo "prepare: hidden repo name must start with hidden-" >&2
+            exit 1
+          fi
+          echo "owner=${owner}" >> "$GITHUB_OUTPUT"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "full=${full}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint hidden-tests installation token
+        id: hidden-app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.EVALUATOR_APP_CLIENT_ID }}
+          private-key: ${{ secrets.EVALUATOR_APP_PRIVATE_KEY }}
+          owner: prompt-arena
+          repositories: ${{ steps.hidden.outputs.name }}
 
       - name: Prepare artifact (no participant code execution)
         env:
-          HIDDEN_TESTS_TOKEN: ${{ secrets.HIDDEN_TESTS_TOKEN }}
+          # Step-scoped only — never job outputs; never passed to execute/submit.
+          HIDDEN_INSTALLATION_TOKEN: ${{ steps.hidden-app-token.outputs.token }}
           PREPARE_WRAP_SECRET: ${{ secrets.PREPARE_WRAP_SECRET }}
           SUBMISSION_ID: ${{ github.event.inputs.submissionId }}
           COMMIT_SHA: ${{ github.event.inputs.commitSha }}
@@ -62,8 +131,11 @@ jobs:
           CHALLENGE_VERSION: ${{ github.event.inputs.challengeVersion }}
           WORKSPACE_REPO: ${{ github.event.inputs.participantRepo }}
         run: |
+          set -euo pipefail
           chmod +x .eval/*.sh
           .eval/prepare.sh
+          # Drop token from this shell after prepare (defense in depth; step env dies with the step).
+          unset HIDDEN_INSTALLATION_TOKEN
 
       - name: Upload encrypted prepared blob
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
@@ -77,7 +149,8 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # 🔴 No job-level secrets. PREPARE_WRAP_SECRET is step-scoped to decrypt only.
+    # 🔴 No job-level secrets. Wrap secret is step-scoped to decrypt only.
+    # 🔴 No App private key, installation tokens, HMAC secret, or backend URL here.
     steps:
       - name: Checkout evaluator (trusted scripts only)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -128,6 +201,7 @@ jobs:
     needs: execute
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # 🔴 HMAC callback secret + backend URL only — no App credentials / installation tokens / wrap secret.
     steps:
       - name: Checkout evaluator (submit script only)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -137,6 +211,11 @@ jobs:
         with:
           name: components
           path: .
+
+      - name: Assert submit env has no App / fetch credentials
+        run: |
+          chmod +x .eval/*.sh
+          .eval/assert_submit_env.sh
 
       - name: Sign + submit score
         env:
