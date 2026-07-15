@@ -2,8 +2,8 @@
 # prepare job only: stage workspace + (if intact) hidden tests; encrypt for artifact transit.
 # 🔴 Never executes participant code. Never echoes tokens/secrets.
 #
-# Requires env: HIDDEN_TESTS_TOKEN PREPARE_WRAP_SECRET SUBMISSION_ID COMMIT_SHA
-#               CHALLENGE_SLUG CHALLENGE_VERSION WORKSPACE_REPO
+# Requires env: HIDDEN_INSTALLATION_TOKEN (when integrity intact) PREPARE_WRAP_SECRET SUBMISSION_ID
+#               COMMIT_SHA CHALLENGE_SLUG CHALLENGE_VERSION WORKSPACE_REPO
 # Expects: ./work (checked out), ./challenges, ./.eval
 set -euo pipefail
 
@@ -34,8 +34,8 @@ intact="$(printf '%s' "$INTEG" | jq -r '.protectedFilesIntact')"
 echo "protectedFilesIntact=$intact"
 
 if [[ "$intact" == "true" ]]; then
-  if [[ -z "${HIDDEN_TESTS_TOKEN:-}" ]]; then
-    echo "prepare: HIDDEN_TESTS_TOKEN not set" >&2
+  if [[ -z "${HIDDEN_INSTALLATION_TOKEN:-}" ]]; then
+    echo "prepare: HIDDEN_INSTALLATION_TOKEN not set" >&2
     exit 1
   fi
   "$DIR/fetch_hidden.sh" work "$(jq -r '.hiddenRepo' "$MANIFEST")"

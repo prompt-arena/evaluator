@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# Fail the execute job if evaluator secrets / App credentials / installation tokens appear in the environment.
-# PREPARE_WRAP_SECRET must only exist on the decrypt step; CALLBACK / App keys / tokens must never appear here.
+# Fail the submit job if App credentials / installation tokens / wrap secret / fetch PATs appear.
+# submit may only use CALLBACK_SECRET + BACKEND_URL (+ result artifact). Never App mint or workspace/hidden fetch.
 set -euo pipefail
 
 leaked=0
 for v in \
-  CALLBACK_SECRET \
-  BACKEND_URL \
   PREPARE_WRAP_SECRET \
   EVALUATOR_APP_PRIVATE_KEY \
   EVALUATOR_APP_CLIENT_ID \
@@ -18,7 +16,7 @@ for v in \
   GITHUB_APP_PRIVATE_KEY
 do
   if [[ -n "${!v:-}" ]]; then
-    echo "assert_execute_env: $v is set (forbidden in execute evaluate steps)" >&2
+    echo "assert_submit_env: $v is set (forbidden in submit)" >&2
     leaked=1
   fi
 done
@@ -27,4 +25,4 @@ if [[ "$leaked" -ne 0 ]]; then
   exit 1
 fi
 
-echo "assert_execute_env: ok"
+echo "assert_submit_env: ok"
