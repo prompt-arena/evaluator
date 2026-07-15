@@ -39,10 +39,9 @@ binding is enforced server-side).
 ```bash
 chmod +x .eval/*.sh .eval/selftest/*.sh
 .eval/selftest/assert_workflow_isolation.sh
-PREPARE_WRAP_SECRET=dev-only .eval/selftest/test_wrap_roundtrip.sh
 ```
 
-`self-test.yml` runs the same checks on PR/push.
+`self-test.yml` runs isolation checks on PR/push.
 
 ## Registering a challenge
 
