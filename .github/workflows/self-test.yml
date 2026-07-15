@@ -1,0 +1,24 @@
+# Static isolation checks for the 3-job evaluator (runs on PR / push to main).
+name: self-test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout evaluator
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Assert prepare/execute/submit isolation
+        run: |
+          chmod +x .eval/selftest/*.sh .eval/*.sh
+          .eval/selftest/assert_workflow_isolation.sh

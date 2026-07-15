@@ -1,8 +1,11 @@
-# 🔴 Authoritative evaluation workflow (ADR-0001). Lives ONLY in the trusted, founder-write-only
-# prompt-arena/evaluator repo. Backend-dispatched via workflow_dispatch. Secrets (HIDDEN_TESTS_TOKEN,
-# CALLBACK_SECRET, BACKEND_URL) are Actions secrets HERE — never inputs, never in the challenge repo.
+# 🔴 Authoritative evaluation workflow (ADR 0001 + ADR 0002). Lives ONLY in the trusted, founder-write-only
+# prompt-arena/evaluator repo. Backend-dispatched via workflow_dispatch. Secrets are Actions secrets HERE —
+# never inputs, never in the challenge repo, never in the platform monorepo.
 #
-# NOTE: actions are referenced by tag for now; pin to commit SHAs before beta (hardening).
+# Trust stages (J3-T02):
+#   prepare — workspace + hidden fetch (secrets); never runs participant code; encrypts artifact
+#   execute — decrypt (step-scoped wrap secret) → build/tests/quality; no job-level secrets; no HMAC secret
+#   submit  — HMAC + callback only; never downloads participant code or hidden tests
 name: evaluate
 
 on:
@@ -12,7 +15,7 @@ on:
         description: Backend submission id (GUID)
         required: true
       participantRepo:
-        description: Public participant repo as owner/name
+        description: Workspace (or participant) repo as owner/name
         required: true
       commitSha:
         description: Exact commit to evaluate
@@ -20,8 +23,11 @@ on:
       challengeSlug:
         description: Challenge slug (selects the integrity manifest)
         required: true
+      challengeVersion:
+        description: Challenge version number (bound into signed callback)
+        required: false
+        default: "1"
 
-# One run per submission; a newer dispatch supersedes an in-flight one.
 concurrency:
   group: eval-${{ github.event.inputs.submissionId }}
   cancel-in-progress: true
@@ -30,59 +36,121 @@ permissions:
   contents: read
 
 jobs:
-  evaluate:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - name: Checkout evaluator (scripts + manifests)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Checkout participant code @ commit
-        uses: actions/checkout@v4
+      - name: Checkout workspace commit (authenticated)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: ${{ github.event.inputs.participantRepo }}
           ref: ${{ github.event.inputs.commitSha }}
           path: work
           persist-credentials: false
+          token: ${{ secrets.WORKSPACE_READ_TOKEN }}
 
-      - uses: actions/setup-node@v4
+      - name: Prepare artifact (no participant code execution)
+        env:
+          HIDDEN_TESTS_TOKEN: ${{ secrets.HIDDEN_TESTS_TOKEN }}
+          PREPARE_WRAP_SECRET: ${{ secrets.PREPARE_WRAP_SECRET }}
+          SUBMISSION_ID: ${{ github.event.inputs.submissionId }}
+          COMMIT_SHA: ${{ github.event.inputs.commitSha }}
+          CHALLENGE_SLUG: ${{ github.event.inputs.challengeSlug }}
+          CHALLENGE_VERSION: ${{ github.event.inputs.challengeVersion }}
+          WORKSPACE_REPO: ${{ github.event.inputs.participantRepo }}
+        run: |
+          chmod +x .eval/*.sh
+          .eval/prepare.sh
+
+      - name: Upload encrypted prepared blob
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: prepared-enc
+          path: prepared.tar.gz.enc
+          if-no-files-found: error
+          retention-days: 1
+
+  execute:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # 🔴 No job-level secrets. PREPARE_WRAP_SECRET is step-scoped to decrypt only.
+    steps:
+      - name: Checkout evaluator (trusted scripts only)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Download prepared blob
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e
+        with:
+          name: prepared-enc
+          path: .
+
+      - name: Decrypt prepared work (secrets end after this step)
+        env:
+          PREPARE_WRAP_SECRET: ${{ secrets.PREPARE_WRAP_SECRET }}
+        run: |
+          chmod +x .eval/*.sh
+          .eval/unwrap_prepared.sh prepared.tar.gz.enc
+          unset PREPARE_WRAP_SECRET
+
+      - name: Assert execute env has no eval secrets
+        run: .eval/assert_execute_env.sh
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af
         with:
           node-version: "20"
 
-      - name: Resolve manifest + integrity
-        id: integrity
+      - name: Evaluate (participant code — no secrets)
         run: |
-          chmod +x .eval/*.sh
-          MANIFEST="challenges/${{ github.event.inputs.challengeSlug }}/manifest.json"
-          if [[ ! -f "$MANIFEST" ]]; then echo "unknown challenge manifest: $MANIFEST" >&2; exit 1; fi
-          echo "manifest=$MANIFEST" >> "$GITHUB_OUTPUT"
-          echo "hiddenRepo=$(jq -r '.hiddenRepo' "$MANIFEST")" >> "$GITHUB_OUTPUT"
-          intact=$(.eval/verify_integrity.sh "$MANIFEST" work | jq -r '.protectedFilesIntact')
-          echo "intact=$intact" >> "$GITHUB_OUTPUT"
-          echo "protectedFilesIntact=$intact"
-
-      # Only script that receives the hidden-tests token. Skipped entirely when tampered.
-      - name: Fetch hidden tests
-        if: steps.integrity.outputs.intact == 'true'
-        run: .eval/fetch_hidden.sh work "${{ steps.integrity.outputs.hiddenRepo }}"
-        env:
-          HIDDEN_TESTS_TOKEN: ${{ secrets.HIDDEN_TESTS_TOKEN }}
-
-      # Runs participant code — deliberately has NO secrets in scope.
-      - name: Evaluate
-        run: |
-          .eval/run.sh work "${{ steps.integrity.outputs.manifest }}" > components.json
+          MANIFEST="challenges/$(jq -r .challengeSlug meta.json)/manifest.json"
+          .eval/run.sh work "$MANIFEST" > components.json
           jq '{integrity, build, tests}' components.json
 
       - name: Scrub hidden material
         if: always()
-        run: rm -rf work/tests/hidden || true
+        run: rm -rf work/tests/hidden prepared.tar.gz prepared.tar.gz.enc || true
+
+      - name: Upload components only
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: components
+          path: |
+            components.json
+            meta.json
+          if-no-files-found: error
+          retention-days: 1
+
+  submit:
+    needs: execute
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout evaluator (submit script only)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Download components
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e
+        with:
+          name: components
+          path: .
 
       - name: Sign + submit score
-        run: .eval/submit.sh components.json
         env:
-          SUBMISSION_ID: ${{ github.event.inputs.submissionId }}
-          RUN_ID: ${{ github.run_id }}
-          COMMIT_SHA: ${{ github.event.inputs.commitSha }}
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
           CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          chmod +x .eval/*.sh
+          export SUBMISSION_ID="$(jq -r .submissionId meta.json)"
+          export COMMIT_SHA="$(jq -r .commitSha meta.json)"
+          export WORKSPACE_REPO="$(jq -r .workspaceRepo meta.json)"
+          export CHALLENGE_VERSION="$(jq -r .challengeVersion meta.json)"
+          if [[ -d work ]] || [[ -d tests/hidden ]]; then
+            echo "submit: refusing — participant/hidden tree present" >&2
+            exit 1
+          fi
+          .eval/submit.sh components.json

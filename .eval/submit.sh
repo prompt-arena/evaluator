@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Build the canonical signed payload and POST it to the backend score callback.
-# Signs `${timestamp}.${nonce}.${body}` with HMAC-SHA256(CALLBACK_SECRET) so the timestamp+nonce headers are
-# cryptographically bound to the body (anti-replay + freshness). Never prints the secret or signature value.
+# Signs `${timestamp}.${nonce}.${body}` with HMAC-SHA256(CALLBACK_SECRET).
 #
 # Usage: submit.sh <components.json>
 # Requires env: SUBMISSION_ID RUN_ID COMMIT_SHA BACKEND_URL CALLBACK_SECRET
+# Optional: WORKSPACE_REPO CHALLENGE_VERSION (included in signed body for ADR 0002 binding)
 set -uo pipefail
 
 COMPONENTS_FILE="$1"
@@ -13,12 +13,17 @@ for v in SUBMISSION_ID RUN_ID COMMIT_SHA BACKEND_URL CALLBACK_SECRET; do
   if [[ -z "${!v:-}" ]]; then echo "submit: $v not set" >&2; exit 1; fi
 done
 
+WORKSPACE_REPO="${WORKSPACE_REPO:-}"
+CHALLENGE_VERSION="${CHALLENGE_VERSION:-1}"
+
 BODY="$(jq -c -n \
   --arg s "$SUBMISSION_ID" \
   --arg r "$RUN_ID" \
   --arg c "$COMMIT_SHA" \
+  --arg w "$WORKSPACE_REPO" \
+  --argjson v "$CHALLENGE_VERSION" \
   --slurpfile comp "$COMPONENTS_FILE" \
-  '{submissionId:$s, runId:$r, commitSha:$c, components:$comp[0]}')"
+  '{submissionId:$s, runId:$r, commitSha:$c, workspaceRepo:$w, challengeVersion:$v, components:$comp[0]}')"
 
 TS="$(date +%s)"
 NONCE="$(openssl rand -hex 16)"

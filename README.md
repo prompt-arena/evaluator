@@ -1,37 +1,50 @@
 # prompt-arena/evaluator (TRUSTED, founder-write-only)
 
-🔴 **This repo is the authoritative scorer (ADR-0001).** It runs the evaluation for every submission in an
-isolated GitHub Actions run, computes component scores, enforces protected-file integrity, and POSTs an
-**HMAC-signed** result to the backend. It is public (for free CI minutes) but **must be branch-protected so
-only the founder can change it** — participants must never be able to modify the workflow/scripts or read
-its secrets.
+🔴 **This repo is the authoritative scorer (ADR 0001 + ADR 0002).** It runs evaluation for every
+submission in isolated GitHub Actions jobs, emits component signals, and POSTs an **HMAC-signed**
+callback. Public for free CI minutes; **branch-protect so only the founder can change it**.
 
-## Trust boundary rules
-- The authoritative `evaluate.yml` + `.eval/*` and ALL secrets live here — never in the public challenge
-  repo (which may only carry an untrusted, secretless `practice.yml`) and never in the backend monorepo.
-- The runner is **not** authoritative for the final score: it emits `components` + a signed payload; the
-  **backend recomputes and decides** the final score.
-- Secrets come from this repo's **Actions secrets**, never from `workflow_dispatch` inputs (inputs leak in
-  public logs).
+## Trust stages (prepare → execute → submit)
+
+| Job | May have | Must not |
+|---|---|---|
+| **prepare** | `WORKSPACE_READ_TOKEN`, `HIDDEN_TESTS_TOKEN`, `PREPARE_WRAP_SECRET` | Run participant code |
+| **execute** | Prepared blob; wrap secret **only** on the decrypt step | Job-level secrets; `CALLBACK_SECRET`; shared cache |
+| **submit** | `CALLBACK_SECRET`, `BACKEND_URL` + `components.json` | Download participant code or hidden tests |
+
+Hidden tests transit between prepare and execute only inside an **AES-encrypted** artifact (`PREPARE_WRAP_SECRET`),
+because this repo is public and cleartext Actions artifacts are downloadable. Trusted scripts always come from
+the evaluator checkout — never from the artifact.
 
 ## Required Actions secrets
-| Secret | Purpose |
-|---|---|
-| `HIDDEN_TESTS_TOKEN` | Fine-grained, **read-only** token for the private `hidden-<slug>` repo. Only `fetch_hidden.sh` sees it. |
-| `CALLBACK_SECRET` | HMAC key shared with the backend to sign the score payload. |
-| `BACKEND_URL` | Base URL the backend exposes (`https://…`) for the score callback. |
 
-## Flow (`.eval/`)
-1. `verify_integrity.sh` — hash protected files vs `challenges/<slug>/manifest.json`; tamper ⇒ score 0.
-2. `fetch_hidden.sh` — clone the private hidden tests (token) and stage them; **only** step with the token.
-3. `run.sh` — integrity + `build.sh` + `run_public_tests.sh` + `run_hidden_tests.sh` + `quality.sh` →
-   canonical `components` JSON. Runs participant code **with no secrets in scope**.
-4. `submit.sh` — build `{submissionId, runId, commitSha, components}`, sign `${ts}.${nonce}.${body}` with
-   `CALLBACK_SECRET`, POST to `BACKEND_URL/api/v1/submissions/{id}/score` with `X-PA-Signature/Timestamp/Nonce`.
+| Secret | Jobs | Purpose |
+|---|---|---|
+| `WORKSPACE_READ_TOKEN` | prepare | Read private `promptarena-workspaces/*` (or public participant repo) at commit |
+| `HIDDEN_TESTS_TOKEN` | prepare | Read-only clone of `prompt-arena/hidden-<slug>` |
+| `PREPARE_WRAP_SECRET` | prepare + execute(decrypt) | Encrypt/decrypt the prepared artifact |
+| `CALLBACK_SECRET` | submit | HMAC key shared with the backend |
+| `BACKEND_URL` | submit | Backend base URL for `POST /api/v1/submissions/{id}/score` |
+
+## Dispatch inputs (non-secret only)
+
+`submissionId`, `participantRepo` (owner/name), `commitSha`, `challengeSlug`, optional `challengeVersion` (default `1`).
+
+Backend today sends the first four (compatible). Signed callback body also includes `workspaceRepo` +
+`challengeVersion` (extra fields; backend HMAC verifies raw body and ignores unknown JSON properties until
+binding is enforced server-side).
+
+## Local / CI self-tests
+
+```bash
+chmod +x .eval/*.sh .eval/selftest/*.sh
+.eval/selftest/assert_workflow_isolation.sh
+PREPARE_WRAP_SECRET=dev-only .eval/selftest/test_wrap_roundtrip.sh
+```
+
+`self-test.yml` runs the same checks on PR/push.
 
 ## Registering a challenge
-Add `challenges/<slug>/manifest.json` with `challengeId`, `slug`, `hiddenRepo`, and the sha256 of every
-protected file. The backend dispatches with inputs: `submissionId`, `participantRepo`, `commitSha`,
-`challengeSlug`.
 
-> **Hardening TODO before beta:** pin `actions/*` to commit SHAs; add branch protection (founder-only).
+Add `challenges/<slug>/manifest.json` with `challengeId`, `slug`, `hiddenRepo`, and sha256 of every
+protected file.
