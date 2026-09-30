@@ -38,9 +38,10 @@ if [[ "$intact" == "true" ]]; then
     echo "prepare: HIDDEN_INSTALLATION_TOKEN not set" >&2
     exit 1
   fi
-  "$DIR/fetch_hidden.sh" work "$(jq -r '.hiddenRepo' "$MANIFEST")"
+  "$DIR/fetch_hidden.sh" work "$(jq -r '.hiddenRepo' "$MANIFEST")" hidden_defects.json
 else
   echo "prepare: skipping hidden fetch (integrity failed)"
+  rm -f hidden_defects.json
 fi
 
 jq -n \
@@ -61,8 +62,10 @@ jq -n \
     integrity: $integrity
   }' > meta.json
 
-# Pack only work/ + meta.json — trusted scripts come from the evaluator checkout in later jobs.
-tar -czf prepared.tar.gz work meta.json
+# Pack only work/ + meta.json (+ the defect config when the challenge has one) — trusted scripts come
+# from the evaluator checkout in later jobs. The config rides the same encrypted artifact as the
+# hidden tests rather than needing a second secret channel.
+tar -czf prepared.tar.gz work meta.json $([[ -f hidden_defects.json ]] && echo hidden_defects.json)
 
 # Encrypt so public-repo artifact downloads cannot read hidden tests in cleartext.
 # Key is Actions secret PREPARE_WRAP_SECRET (prepare encrypt + execute decrypt step only).
@@ -72,6 +75,7 @@ openssl enc -aes-256-cbc -pbkdf2 -salt \
   -pass env:PREPARE_WRAP_SECRET
 
 rm -f prepared.tar.gz
-# Scrub cleartext work from the prepare runner before job end.
+# Scrub cleartext work and answer-key material from the prepare runner before job end.
 rm -rf work
+rm -f hidden_defects.json
 echo "prepare: encrypted artifact ready"

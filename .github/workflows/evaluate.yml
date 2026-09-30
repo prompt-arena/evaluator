@@ -184,7 +184,7 @@ jobs:
 
       - name: Scrub hidden material
         if: always()
-        run: rm -rf work/tests/hidden prepared.tar.gz prepared.tar.gz.enc || true
+        run: rm -rf work/tests/hidden hidden_defects.json prepared.tar.gz prepared.tar.gz.enc || true
 
       - name: Upload components only
         if: always()

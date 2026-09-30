@@ -22,3 +22,9 @@ jobs:
         run: |
           chmod +x .eval/selftest/*.sh .eval/*.sh
           .eval/selftest/assert_workflow_isolation.sh
+
+      - name: Assert no answer-key material in this public repo
+        run: .eval/selftest/assert_no_answer_key.sh
+
+      - name: Defect detection engine tests
+        run: .eval/detect_defects.test.sh
